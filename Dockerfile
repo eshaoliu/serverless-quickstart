@@ -7,16 +7,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git cmake python3 python3-pip curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Clone llama.cpp with retries to tolerate transient network issues.
+RUN set -e; \
+    for i in 1 2 3; do \
+        echo "Cloning llama.cpp (attempt $i)..."; \
+        rm -rf /tmp/llama.cpp; \
+        git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp && break; \
+        echo "Clone failed, retrying in 5s..."; \
+        sleep 5; \
+    done
+
 # Build llama.cpp server with CUDA support.
 # Compile for common RunPod GPU architectures: A100(sm_80), A10G(sm_86), RTX 4090(sm_89), H100(sm_90)
-RUN git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp \
-    && cd /tmp/llama.cpp \
-    && cmake -B build \
+# Use -j4 instead of -j$(nproc) to avoid running out of memory during the build.
+RUN set -e; \
+    cd /tmp/llama.cpp; \
+    cmake -B build \
         -DGGML_CUDA=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
-    && cmake --build build --config Release --target llama-server -j$(nproc) \
-    && cp build/bin/llama-server /app/llama-server \
-    && rm -rf /tmp/llama.cpp
+        -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90"; \
+    cmake --build build --config Release --target llama-server -j4; \
+    cp build/bin/llama-server /app/llama-server; \
+    rm -rf /tmp/llama.cpp
 
 # Install Python dependencies
 COPY requirements.txt .
