@@ -12,9 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies. Debian 12 marks the system environment as
+# externally-managed, so we need --break-system-packages in this single-purpose
+# container.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt
 
 # Copy the RunPod handler
 COPY handler.py .
