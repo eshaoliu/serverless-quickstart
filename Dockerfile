@@ -1,12 +1,11 @@
-# Build llama.cpp server from source with CUDA support.
-# Using split RUN steps so that if one fails, the exact failing step is clear in the logs.
+# Build llama.cpp server from source with CUDA support, optimized for RunPod's build limits.
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 WORKDIR /app
 
 # Install build and runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git cmake python3 python3-pip curl ca-certificates libcurl4-openssl-dev libgomp1 \
+    build-essential git cmake python3 python3-pip curl ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone llama.cpp with retries to tolerate transient network issues.
@@ -20,16 +19,20 @@ RUN set -e; \
     done
 
 # Configure the build for CUDA.
-# Compile for common RunPod GPU architectures: A100(sm_80), A10G(sm_86), RTX 4090(sm_89), H100(sm_90)
+# Target only the two most common 24GB RunPod GPU architectures:
+#   sm_86 (A10G, RTX 3090) and sm_89 (RTX 4090)
+# Disable flash-attention all-quants and curl to reduce compile time.
 RUN cd /tmp/llama.cpp && \
     cmake -B build \
         -DGGML_CUDA=ON \
-        -DLLAMA_CURL=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90"
+        -DLLAMA_CURL=OFF \
+        -DGGML_CUDA_FA_ALL_QUANTS=OFF \
+        -DCMAKE_CUDA_ARCHITECTURES="86;89"
 
-# Build only the llama-server target. Use -j4 to avoid OOM in the build environment.
+# Build only the llama-server target using all available cores.
+# If this OOMs, reduce -j$(nproc) to -j4 in a follow-up commit.
 RUN cd /tmp/llama.cpp && \
-    cmake --build build --config Release --target llama-server -j4
+    cmake --build build --config Release --target llama-server -j$(nproc)
 
 # Install the binary and shared libraries into /app
 RUN cd /tmp/llama.cpp && \
