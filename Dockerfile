@@ -19,9 +19,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the RunPod handler
 COPY handler.py .
 
-# The official image places llama-server at /llama-server; make it available
+# Find the pre-built llama-server binary inside the image and expose it
 # at the path handler.py expects by default.
-RUN ln -s /llama-server /app/llama-server
+RUN set -e; \
+    LLAMA_BIN=$(find / -name "llama-server" -type f 2>/dev/null | head -n1); \
+    if [ -z "$LLAMA_BIN" ]; then \
+        echo "ERROR: llama-server binary not found in base image"; \
+        exit 1; \
+    fi; \
+    echo "Found llama-server at: $LLAMA_BIN"; \
+    ln -s "$LLAMA_BIN" /app/llama-server
 
 # Clear the inherited ENTRYPOINT so CMD is interpreted as a plain command.
 ENTRYPOINT []
