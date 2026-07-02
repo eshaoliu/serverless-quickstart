@@ -8,6 +8,7 @@ import runpod
 MODEL_PATH = os.environ.get("MODEL_PATH", "/mnt/models/model.gguf")
 LLAMA_SERVER_PORT = int(os.environ.get("LLAMA_SERVER_PORT", "8080"))
 LLAMA_SERVER_URL = f"http://127.0.0.1:{LLAMA_SERVER_PORT}"
+LLAMA_SERVER_BIN = os.environ.get("LLAMA_SERVER_BIN", "/app/llama-server")
 N_GPU_LAYERS = os.environ.get("N_GPU_LAYERS", "999")
 CONTEXT_SIZE = os.environ.get("CONTEXT_SIZE", "32768")
 CHAT_TEMPLATE = os.environ.get("CHAT_TEMPLATE", "")
@@ -26,7 +27,7 @@ def start_llama_server():
         )
 
     cmd = [
-        "/app/llama-server",
+        LLAMA_SERVER_BIN,
         "-m", MODEL_PATH,
         "--host", "127.0.0.1",
         "--port", str(LLAMA_SERVER_PORT),

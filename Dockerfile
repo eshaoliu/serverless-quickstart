@@ -1,33 +1,16 @@
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+# Use the official pre-built llama.cpp CUDA server image as the base.
+# This avoids compiling llama.cpp from source inside RunPod's build environment,
+# which is prone to network/OOM failures.
+FROM ghcr.io/ggerganov/llama.cpp:server-cuda
 
-WORKDIR /app
+USER root
 
-# Install build and runtime dependencies
+# Install Python and pip
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git cmake python3 python3-pip curl ca-certificates \
+    python3 python3-pip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone llama.cpp with retries to tolerate transient network issues.
-RUN set -e; \
-    for i in 1 2 3; do \
-        echo "Cloning llama.cpp (attempt $i)..."; \
-        rm -rf /tmp/llama.cpp; \
-        git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp && break; \
-        echo "Clone failed, retrying in 5s..."; \
-        sleep 5; \
-    done
-
-# Build llama.cpp server with CUDA support.
-# Compile for common RunPod GPU architectures: A100(sm_80), A10G(sm_86), RTX 4090(sm_89), H100(sm_90)
-# Use -j4 instead of -j$(nproc) to avoid running out of memory during the build.
-RUN set -e; \
-    cd /tmp/llama.cpp; \
-    cmake -B build \
-        -DGGML_CUDA=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90"; \
-    cmake --build build --config Release --target llama-server -j4; \
-    cp build/bin/llama-server /app/llama-server; \
-    rm -rf /tmp/llama.cpp
+WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -35,6 +18,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the RunPod handler
 COPY handler.py .
+
+# The official image places llama-server at /llama-server; make it available
+# at the path handler.py expects by default.
+RUN ln -s /llama-server /app/llama-server
+
+# Clear the inherited ENTRYPOINT so CMD is interpreted as a plain command.
+ENTRYPOINT []
 
 ENV PYTHONUNBUFFERED=1
 ENV LLAMA_SERVER_PORT=8080
