@@ -26,5 +26,4 @@ def handler(event):
     return prompt 
 
 # Start the Serverless function when the script is run
-if __name__ == '__main__':
-    runpod.serverless.start({'handler': handler })
+runpod.serverless.start({'handler': handler})
