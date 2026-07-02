@@ -1,7 +1,7 @@
 # Use the official pre-built llama.cpp CUDA server image as the base.
 # This avoids compiling llama.cpp from source inside RunPod's build environment,
 # which is prone to network/OOM failures.
-FROM ghcr.io/ggerganov/llama.cpp:server-cuda
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b6795
 
 USER root
 
