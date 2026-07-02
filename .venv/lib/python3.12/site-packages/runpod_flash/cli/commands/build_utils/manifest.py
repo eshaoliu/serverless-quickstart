@@ -1,0 +1,536 @@
+"""Builder for flash_manifest.json."""
+
+import importlib.util
+import logging
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from runpod_flash.core.resources.constants import (
+    DEFAULT_PYTHON_VERSION,
+    validate_python_version,
+)
+
+from .scanner import (
+    RemoteFunctionMetadata,
+    file_to_module_path,
+    file_to_url_prefix,
+)
+
+logger = logging.getLogger(__name__)
+
+RESERVED_PATHS = ["/execute", "/ping"]
+
+
+def _serialize_network_volume(nv) -> dict:
+    """Serialize a NetworkVolume to a manifest-safe dict."""
+    nv_config: dict = {}
+    if nv.name is not None:
+        nv_config["name"] = nv.name
+    if getattr(nv, "id", None) is not None:
+        nv_config["id"] = nv.id
+    if nv.size is not None:
+        nv_config["size"] = nv.size
+    if hasattr(nv, "dataCenterId") and nv.dataCenterId is not None:
+        nv_config["dataCenterId"] = (
+            nv.dataCenterId.value
+            if hasattr(nv.dataCenterId, "value")
+            else nv.dataCenterId
+        )
+    return nv_config
+
+
+class ManifestBuilder:
+    """Builds flash_manifest.json from discovered remote functions."""
+
+    def __init__(
+        self,
+        project_name: str,
+        remote_functions: List[RemoteFunctionMetadata],
+        scanner=None,
+        build_dir: Optional[Path] = None,
+        python_version: Optional[str] = None,
+    ):
+        self.project_name = project_name
+        self.remote_functions = remote_functions
+        self.scanner = scanner  # Optional: RuntimeScanner with resource config info
+        self.build_dir = build_dir
+        # User-supplied app-level override; None means "infer from resources".
+        self._python_version_override = python_version
+        # Effective app-level version; set by build() via _reconcile_python_version.
+        self.python_version: Optional[str] = None
+
+    def _import_module(self, file_path: Path):
+        """Import a module from file path, returning (module, cleanup_fn).
+
+        Caller must invoke cleanup_fn when done with the module.
+        Returns (None, noop) if the module cannot be loaded or executed.
+        """
+        noop = lambda: None  # noqa: E731
+        spec = importlib.util.spec_from_file_location(file_path.stem, file_path)
+        if not spec or not spec.loader:
+            return None, noop
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+
+        parent_dir = str(file_path.parent)
+        added_to_path = parent_dir not in sys.path
+        if added_to_path:
+            sys.path.insert(0, parent_dir)
+
+        def cleanup():
+            if spec.name in sys.modules:
+                del sys.modules[spec.name]
+            if added_to_path:
+                try:
+                    sys.path.remove(parent_dir)
+                except ValueError:
+                    pass
+
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            cleanup()
+            return None, noop
+
+        return module, cleanup
+
+    def _extract_deployment_config(
+        self, resource_name: str, config_variable: Optional[str], resource_type: str
+    ) -> Dict[str, Any]:
+        """Extract deployment config by importing the source module.
+
+        Finds the source file by matching ``resource_config_name``, imports it,
+        then reads the resource config object. For resources with a
+        ``config_variable`` (e.g. ``gpu_config = LiveServerless(...)``), reads
+        the named module attribute. For inline ``@Endpoint(...)`` decorators
+        (no config_variable), reads ``__remote_config__`` from the decorated
+        function. Both paths produce a fully-resolved config object with enum
+        expansion and validation already applied.
+        """
+        config: Dict[str, Any] = {}
+
+        # find the source file by resource name, not config_variable,
+        # to avoid collisions when multiple files use the same variable name
+        func_meta = None
+        for func in self.remote_functions:
+            if func.resource_config_name == resource_name:
+                func_meta = func
+                break
+
+        if func_meta is None or not func_meta.file_path:
+            return config
+        if not func_meta.file_path.exists():
+            return config
+
+        try:
+            module, cleanup = self._import_module(func_meta.file_path)
+            if module is None:
+                return config
+
+            try:
+                resource_config = None
+                remote_cfg = None
+
+                if config_variable and hasattr(module, config_variable):
+                    resource_config = getattr(module, config_variable)
+                else:
+                    # inline @Endpoint() -- read __remote_config__ from the function
+                    fn = getattr(module, func_meta.function_name, None)
+                    if fn is not None:
+                        remote_cfg = getattr(fn, "__remote_config__", None)
+                        if isinstance(remote_cfg, dict):
+                            resource_config = remote_cfg.get("resource_config")
+
+                if resource_config is None:
+                    return config
+
+                # Extract max_concurrency from Endpoint facade before unwrapping.
+                # For module-level Endpoint variables, read from the instance.
+                # For inline @Endpoint() decorators, the facade is gone by the
+                # time we reach here -- read from __remote_config__ instead.
+                if hasattr(resource_config, "_max_concurrency"):
+                    mc = resource_config._max_concurrency
+                    if mc > 1:
+                        config["max_concurrency"] = mc
+                elif (
+                    isinstance(remote_cfg, dict)
+                    and remote_cfg.get("max_concurrency", 1) > 1
+                ):
+                    config["max_concurrency"] = remote_cfg["max_concurrency"]
+
+                # unwrap Endpoint facade to the internal resource config
+                if hasattr(resource_config, "_build_resource_config"):
+                    resource_config = resource_config._build_resource_config()
+
+                self._extract_config_properties(config, resource_config)
+            finally:
+                cleanup()
+
+        except Exception as e:
+            logger.debug(
+                f"Failed to extract deployment config for {resource_name}: {e}"
+            )
+
+        return config
+
+    @staticmethod
+    def _extract_config_properties(config: Dict[str, Any], resource_config) -> None:
+        """Read deployment properties from a resource config object into config dict."""
+        if hasattr(resource_config, "imageName") and resource_config.imageName:
+            config["imageName"] = resource_config.imageName
+
+        if (
+            hasattr(resource_config, "python_version")
+            and resource_config.python_version
+        ):
+            config["python_version"] = resource_config.python_version
+
+        if hasattr(resource_config, "templateId") and resource_config.templateId:
+            config["templateId"] = resource_config.templateId
+
+        if hasattr(resource_config, "gpuIds") and resource_config.gpuIds:
+            config["gpuIds"] = resource_config.gpuIds
+
+        if hasattr(resource_config, "instanceIds") and resource_config.instanceIds:
+            config["instanceIds"] = [
+                i.value if hasattr(i, "value") else str(i)
+                for i in resource_config.instanceIds
+            ]
+
+        if hasattr(resource_config, "workersMin"):
+            config["workersMin"] = resource_config.workersMin
+
+        if hasattr(resource_config, "workersMax"):
+            config["workersMax"] = resource_config.workersMax
+
+        if (
+            hasattr(resource_config, "idleTimeout")
+            and resource_config.idleTimeout is not None
+        ):
+            config["idleTimeout"] = resource_config.idleTimeout
+
+        if (
+            hasattr(resource_config, "scalerType")
+            and resource_config.scalerType is not None
+        ):
+            val = resource_config.scalerType
+            config["scalerType"] = val.value if hasattr(val, "value") else val
+
+        if (
+            hasattr(resource_config, "scalerValue")
+            and resource_config.scalerValue is not None
+        ):
+            config["scalerValue"] = resource_config.scalerValue
+
+        if hasattr(resource_config, "locations") and resource_config.locations:
+            config["locations"] = resource_config.locations
+
+        if (
+            hasattr(resource_config, "minCudaVersion")
+            and resource_config.minCudaVersion is not None
+        ):
+            v = resource_config.minCudaVersion
+            config["minCudaVersion"] = v.value if hasattr(v, "value") else v
+
+        if hasattr(resource_config, "env") and resource_config.env is not None:
+            config["env"] = dict(resource_config.env)
+
+        if (
+            hasattr(resource_config, "networkVolumes")
+            and resource_config.networkVolumes
+        ):
+            config["networkVolumes"] = [
+                _serialize_network_volume(nv) for nv in resource_config.networkVolumes
+            ]
+
+        elif (
+            hasattr(resource_config, "networkVolume") and resource_config.networkVolume
+        ):
+            config["networkVolume"] = _serialize_network_volume(
+                resource_config.networkVolume
+            )
+
+        elif (
+            hasattr(resource_config, "networkVolumeId")
+            and resource_config.networkVolumeId
+        ):
+            config["networkVolumeId"] = resource_config.networkVolumeId
+
+        if hasattr(resource_config, "template") and resource_config.template:
+            template_obj = resource_config.template
+            template_config = {}
+
+            if hasattr(template_obj, "containerDiskInGb"):
+                template_config["containerDiskInGb"] = template_obj.containerDiskInGb
+            if hasattr(template_obj, "dockerArgs"):
+                template_config["dockerArgs"] = template_obj.dockerArgs
+            if hasattr(template_obj, "startScript"):
+                template_config["startScript"] = template_obj.startScript
+            if hasattr(template_obj, "advancedStart"):
+                template_config["advancedStart"] = template_obj.advancedStart
+            if hasattr(template_obj, "containerRegistryAuthId"):
+                template_config["containerRegistryAuthId"] = (
+                    template_obj.containerRegistryAuthId
+                )
+
+            if template_config:
+                config["template"] = template_config
+
+        return config
+
+    def _reconcile_python_version(
+        self, resources_dict: Dict[str, Dict[str, Any]]
+    ) -> str:
+        """Pick one Python version for the app from per-resource declarations.
+
+        Flash apps ship as a single tarball, so every resource must target the
+        same Python ABI. Resolution order:
+          1. Explicit override passed to ManifestBuilder (validated)
+          2. Exactly one distinct ``python_version`` declared across resources
+          3. ``DEFAULT_PYTHON_VERSION`` when no resource declares one
+
+        Raises:
+            ValueError: When resources declare conflicting ``python_version``
+                values, or when the override conflicts with a resource's
+                explicit declaration.
+        """
+        per_resource: Dict[str, str] = {
+            name: r["python_version"]
+            for name, r in resources_dict.items()
+            if r.get("python_version")
+        }
+        distinct = set(per_resource.values())
+
+        if self._python_version_override:
+            chosen = validate_python_version(self._python_version_override)
+            conflicting = {
+                name: version
+                for name, version in per_resource.items()
+                if version != chosen
+            }
+            if conflicting:
+                details = ", ".join(
+                    f"{name}={version}" for name, version in sorted(conflicting.items())
+                )
+                raise ValueError(
+                    f"python_version override '{chosen}' conflicts with resource "
+                    f"declarations: {details}. Either remove the override or "
+                    f"align all resources to '{chosen}'."
+                )
+            return chosen
+
+        if len(distinct) > 1:
+            details = ", ".join(
+                f"{name}={version}" for name, version in sorted(per_resource.items())
+            )
+            raise ValueError(
+                "Flash apps require one python_version across all resources "
+                f"(found {sorted(distinct)}): {details}. Set python_version to the "
+                "same value on every resource, or omit it to use the default "
+                f"({DEFAULT_PYTHON_VERSION})."
+            )
+
+        if distinct:
+            return validate_python_version(next(iter(distinct)))
+
+        return DEFAULT_PYTHON_VERSION
+
+    def build(self) -> Dict[str, Any]:
+        """Build the manifest dictionary.
+
+        Resources are keyed by resource_config_name for runtime compatibility.
+        Each resource entry includes file_path, local_path_prefix, and module_path
+        for the dev server and LB handler generator.
+        """
+        # Group functions by resource_config_name
+        resources: Dict[str, List[RemoteFunctionMetadata]] = {}
+
+        for func in self.remote_functions:
+            if func.resource_config_name not in resources:
+                resources[func.resource_config_name] = []
+            resources[func.resource_config_name].append(func)
+
+        # detect the same resource name defined in multiple files
+        for name, funcs in resources.items():
+            files = {str(f.file_path) for f in funcs}
+            if len(files) > 1:
+                paths = ", ".join(sorted(files))
+                raise ValueError(
+                    f"endpoint '{name}' is defined in multiple files: {paths}. "
+                    f"each endpoint name must be unique across the project."
+                )
+
+        # Build manifest structure
+        resources_dict: Dict[str, Dict[str, Any]] = {}
+        function_registry: Dict[str, str] = {}
+        routes_dict: Dict[
+            str, Dict[str, str]
+        ] = {}  # resource_name -> {route_key -> function_name}
+
+        # Determine project root for path derivation.
+        # build_dir is .flash/.build which *contains* the copied project files,
+        # so use it directly (not its parent, which would be .flash/).
+        project_root = self.build_dir if self.build_dir else Path.cwd()
+
+        for resource_name, functions in sorted(resources.items()):
+            # Use actual resource type from first function in group
+            resource_type = (
+                functions[0].resource_type if functions else "LiveServerless"
+            )
+
+            # Extract flags from first function (determined by isinstance() at scan time)
+            is_load_balanced = functions[0].is_load_balanced if functions else False
+            is_live_resource = functions[0].is_live_resource if functions else False
+
+            # Derive path fields from the first function's source file.
+            # All functions in a resource share the same source file per convention.
+            first_file = functions[0].file_path if functions else None
+            file_path_str = ""
+            local_path_prefix = ""
+            resource_module_path = functions[0].module_path if functions else ""
+
+            if first_file and first_file.exists():
+                try:
+                    file_path_str = str(first_file.relative_to(project_root))
+                    local_path_prefix = file_to_url_prefix(first_file, project_root)
+                    resource_module_path = file_to_module_path(first_file, project_root)
+                except ValueError:
+                    # File is outside project root — fall back to module_path
+                    file_path_str = str(first_file)
+                    local_path_prefix = "/" + functions[0].module_path.replace(".", "/")
+            elif first_file:
+                # File path may be relative (in test scenarios)
+                file_path_str = str(first_file)
+                local_path_prefix = "/" + functions[0].module_path.replace(".", "/")
+
+            # Validate and collect routing for LB endpoints
+            resource_routes = {}
+            if is_load_balanced:
+                for f in functions:
+                    if not f.http_method or not f.http_path:
+                        raise ValueError(
+                            f"{resource_type} endpoint '{resource_name}' requires "
+                            f"method and path for function '{f.function_name}'. "
+                            f"Got method={f.http_method}, path={f.http_path}"
+                        )
+
+                    # Check for route conflicts (same method + path)
+                    route_key = f"{f.http_method} {f.http_path}"
+                    if route_key in resource_routes:
+                        raise ValueError(
+                            f"Duplicate route '{route_key}' in resource '{resource_name}': "
+                            f"both '{resource_routes[route_key]}' and '{f.function_name}' "
+                            f"are mapped to the same route"
+                        )
+                    resource_routes[route_key] = f.function_name
+
+                    # Check for reserved paths
+                    if f.http_path in RESERVED_PATHS:
+                        raise ValueError(
+                            f"Function '{f.function_name}' cannot use reserved path '{f.http_path}'. "
+                            f"Reserved paths: {', '.join(RESERVED_PATHS)}"
+                        )
+
+            # Extract config_variable from first function (all functions in same resource share same config)
+            config_variable = functions[0].config_variable if functions else None
+
+            functions_list = [
+                {
+                    "name": f.function_name,
+                    "module": f.module_path,
+                    "is_async": f.is_async,
+                    "is_class": f.is_class,
+                    **(
+                        {"class_methods": f.class_methods}
+                        if f.is_class and f.class_methods
+                        else {}
+                    ),
+                    **(
+                        {"http_method": f.http_method, "http_path": f.http_path}
+                        if is_load_balanced
+                        else {}
+                    ),
+                }
+                for f in functions
+            ]
+
+            # Extract deployment config (imageName, templateId, etc.) for auto-provisioning
+            deployment_config = self._extract_deployment_config(
+                resource_name, config_variable, resource_type
+            )
+
+            # Determine if this resource makes remote calls
+            makes_remote_calls = any(func.calls_remote_functions for func in functions)
+
+            resources_dict[resource_name] = {
+                "resource_type": resource_type,
+                "file_path": file_path_str,
+                "local_path_prefix": local_path_prefix,
+                "module_path": resource_module_path,
+                "functions": functions_list,
+                "is_load_balanced": is_load_balanced,
+                "is_live_resource": is_live_resource,
+                "config_variable": config_variable,
+                "makes_remote_calls": makes_remote_calls,
+                **deployment_config,  # Include imageName, templateId, gpuIds, workers config, python_version
+            }
+
+            # max_concurrency is QB-only; warn and remove for LB endpoints
+            if (
+                is_load_balanced
+                and resources_dict[resource_name].get("max_concurrency", 1) > 1
+            ):
+                logger.warning(
+                    "max_concurrency=%d on LB endpoint '%s' is ignored. "
+                    "LB endpoints handle concurrency via uvicorn.",
+                    resources_dict[resource_name]["max_concurrency"],
+                    resource_name,
+                )
+                resources_dict[resource_name].pop("max_concurrency", None)
+
+            if not is_load_balanced:
+                resources_dict[resource_name]["handler_file"] = (
+                    f"handler_{resource_name}.py"
+                )
+
+            # Store routes for LB endpoints
+            if resource_routes:
+                routes_dict[resource_name] = resource_routes
+
+            # Build function registry for quick lookup
+            for f in functions:
+                if f.function_name in function_registry:
+                    raise ValueError(
+                        f"Duplicate function name '{f.function_name}' found in "
+                        f"resources '{function_registry[f.function_name]}' and '{resource_name}'"
+                    )
+                function_registry[f.function_name] = resource_name
+
+        # Reconcile app-level python_version across resources. One tarball serves
+        # every resource in an app, so all resources must agree on one version.
+        self.python_version = self._reconcile_python_version(resources_dict)
+
+        # Stamp every resource's target_python_version with the reconciled
+        # app-level value so the runtime and pip-wheel step see a consistent ABI.
+        for resource in resources_dict.values():
+            resource["target_python_version"] = self.python_version
+
+        manifest = {
+            "version": "1.0",
+            "python_version": self.python_version,
+            "generated_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "project_name": self.project_name,
+            "resources": resources_dict,
+            "function_registry": function_registry,
+        }
+
+        # Add routes section if there are LB endpoints with routing
+        if routes_dict:
+            manifest["routes"] = routes_dict
+
+        return manifest

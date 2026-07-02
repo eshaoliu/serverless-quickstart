@@ -1,0 +1,37 @@
+"""CLI output formatting helpers."""
+
+from datetime import datetime
+
+from rich.console import Console
+
+
+def print_error(console: Console, message: str) -> None:
+    """Print a standardized error message."""
+    console.print(f"[red]\u2717[/red] {message.lstrip()}")
+
+
+def print_warning(console: Console, message: str) -> None:
+    """Print a standardized warning message."""
+    console.print(f"[yellow]![/yellow] {message.lstrip()}")
+
+
+def format_datetime(value: str | None) -> str:
+    """Format an ISO 8601 datetime string into a human-readable local time.
+
+    Returns a string like "Thu, Feb 19 2026 1:33 PM PST".
+    Returns "-" for None/empty values, or the original value if unparseable.
+    """
+    if not value:
+        return "-"
+
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        local_dt = dt.astimezone()
+        tz_name = local_dt.strftime("%Z")
+        # strftime with manual zero-strip for cross-platform compat
+        # (%-d and %-I are glibc extensions, not available on windows)
+        day = local_dt.day
+        hour = int(local_dt.strftime("%I"))
+        return local_dt.strftime(f"%a, %b {day} %Y {hour}:%M %p {tz_name}")
+    except (ValueError, TypeError):
+        return value
