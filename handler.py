@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import os
 import shutil
 import subprocess
@@ -61,6 +62,51 @@ def _free_space_gb(path: str) -> float:
         return stat.free / (1024**3)
     except Exception:
         return 0.0
+
+
+def _sha256_file(path: str) -> str:
+    """Return the hex sha256 digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(16 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _stage_gguf_as_blob(gguf_path: str) -> str:
+    """Make the GGUF reachable as an Ollama blob without copying it.
+
+    Ollama stores model weights under $OLLAMA_MODELS/blobs/sha256-<digest>.
+    By pre-computing the digest and hard-linking the original GGUF into that
+    location, `ollama create` sees the blob already exists and skips the copy,
+    so the Hugging Face cache GGUF is not duplicated on disk.
+    """
+    digest = _sha256_file(gguf_path)
+    blob_dir = os.path.join(OLLAMA_MODELS, "blobs")
+    os.makedirs(blob_dir, exist_ok=True)
+    blob_path = os.path.join(blob_dir, f"sha256-{digest}")
+
+    if os.path.exists(blob_path):
+        print(f"Ollama blob already exists: {blob_path}", flush=True)
+        return digest
+
+    try:
+        # Hard link shares the inode; no extra disk space is used.
+        os.link(gguf_path, blob_path)
+        print(
+            f"Hard-linked GGUF to Ollama blob (no extra space): "
+            f"{gguf_path} -> {blob_path}",
+            flush=True,
+        )
+    except OSError as exc:
+        # Fall back to a symlink if hard links are not possible (e.g. cross-fs).
+        os.symlink(os.path.abspath(gguf_path), blob_path)
+        print(
+            f"Could not hard-link ({exc}); symlinked GGUF to Ollama blob: "
+            f"{blob_path} -> {gguf_path}",
+            flush=True,
+        )
+    return digest
 
 
 def resolve_snapshot_path(model_id: str) -> str:
@@ -207,6 +253,10 @@ def _create_model() -> bool:
     gguf_path = _find_gguf()
     if gguf_path:
         os.makedirs(OLLAMA_MODELS, exist_ok=True)
+
+        # Stage the GGUF as an Ollama blob first so `ollama create` does not
+        # duplicate the multi-GB weights file in $OLLAMA_MODELS/blobs.
+        _stage_gguf_as_blob(gguf_path)
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix="Modelfile", delete=False
