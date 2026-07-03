@@ -90,8 +90,14 @@ def _find_gguf() -> str | None:
     3. The only .gguf file under /mnt/models (recursively).
     4. None.
     """
-    if MODEL_PATH and os.path.isfile(MODEL_PATH):
-        return MODEL_PATH
+    if MODEL_PATH:
+        if os.path.isfile(MODEL_PATH):
+            return MODEL_PATH
+        if os.path.isdir(MODEL_PATH):
+            print(f"MODEL_PATH is a directory; looking for GGUF inside: {MODEL_PATH}", flush=True)
+            cached_path = _pick_gguf_from_dir(MODEL_PATH)
+            if cached_path:
+                return cached_path
 
     try:
         snapshot_dir = _resolve_snapshot_path(MODEL_NAME)
@@ -131,6 +137,9 @@ def _load_model() -> LLM:
             "  2. Configure a RunPod cached model (MODEL_NAME).\n"
             "  3. Mount a Network Volume at /mnt/models with a .gguf file."
         )
+
+    if not os.path.isfile(gguf_path):
+        raise RuntimeError(f"Resolved path is not a file: {gguf_path}")
 
     print(f"Loading GGUF with vLLM: {gguf_path}", flush=True)
     print(
