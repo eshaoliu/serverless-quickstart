@@ -22,6 +22,10 @@ GPU_MEMORY_UTILIZATION = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0.9"))
 
 _llm = None
 
+# Identifies this handler version in worker logs.
+print("handler.py: vllm-gGUF branch", flush=True)
+print(f"MODEL_PATH={MODEL_PATH!r}, MODEL_NAME={MODEL_NAME!r}, MODEL_FILE={MODEL_FILE!r}", flush=True)
+
 
 def _resolve_snapshot_path(model_id: str) -> str:
     """Resolve the local snapshot path for a RunPod cached Hugging Face model."""
@@ -54,8 +58,8 @@ def _resolve_snapshot_path(model_id: str) -> str:
 
 
 def _pick_gguf_from_dir(directory: str) -> str | None:
-    """Return a single .gguf from *directory*, preferring MODEL_FILE if set."""
-    ggufs = glob.glob(os.path.join(directory, "*.gguf"))
+    """Return a single .gguf from *directory* or its subdirs, preferring MODEL_FILE."""
+    ggufs = glob.glob(os.path.join(directory, "**", "*.gguf"), recursive=True)
     ggufs = [f for f in ggufs if os.path.isfile(f)]
     if not ggufs:
         return None
@@ -65,8 +69,8 @@ def _pick_gguf_from_dir(directory: str) -> str | None:
             if os.path.basename(f) == MODEL_FILE:
                 return f
         print(
-            f"MODEL_FILE {MODEL_FILE} not found in {directory}; "
-            "using other GGUF(s).",
+            f"MODEL_FILE {MODEL_FILE} not found under {directory}; "
+            f"using other GGUF(s): {ggufs}",
             flush=True,
         )
 
@@ -74,7 +78,7 @@ def _pick_gguf_from_dir(directory: str) -> str | None:
         return ggufs[0]
 
     print(
-        f"Warning: found multiple GGUFs in {directory}: {ggufs}. "
+        f"Warning: found multiple GGUFs under {directory}: {ggufs}. "
         "Set MODEL_FILE to choose one explicitly.",
         flush=True,
     )
