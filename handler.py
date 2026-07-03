@@ -221,7 +221,7 @@ def _create_model() -> bool:
                 stderr=subprocess.STDOUT,
                 text=True,
                 check=True,
-                timeout=300,
+                timeout=1800,
             )
             print(result.stdout, flush=True)
             _model_ready = True
