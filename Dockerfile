@@ -21,24 +21,15 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirement
 # Copy the RunPod handler
 COPY handler.py .
 
-# Bake the GGUF model into the image so the endpoint works without a Network Volume.
-# The Q4_K_M quant matches the Ollama registry model that was being pulled at runtime.
-ARG HF_MODEL_REPO=DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF
-ARG HF_MODEL_FILE=Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf
-RUN set -eux && \
-    curl -L --fail --retry 3 --retry-delay 5 --connect-timeout 30 \
-         -o /app/model.gguf \
-         "https://huggingface.co/${HF_MODEL_REPO}/resolve/main/${HF_MODEL_FILE}" && \
-    ls -lh /app/model.gguf
-
-# Ollama listens on 127.0.0.1:11434 by default.
-# Keep Ollama models on local image storage, not on the (optional) Network Volume.
+# Use the RunPod cached model instead of baking the GGUF into the image.
+# The model is resolved at runtime from /runpod-volume/huggingface-cache/hub.
 ENV PYTHONUNBUFFERED=1
 ENV OLLAMA_HOST=127.0.0.1:11434
 ENV OLLAMA_MODELS=/app/.ollama
-ENV MODEL_PATH=/app/model.gguf
+ENV MODEL_NAME=DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF
+ENV MODEL_FILE=Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf
 ENV OLLAMA_MODEL_NAME=runpod-model
-# Disable runtime Ollama registry pulling; we already ship the GGUF.
+# Disable runtime Ollama registry pulling; we load the cached GGUF instead.
 ENV OLLAMA_PULL_MODEL=
 
 # Clear any inherited ENTRYPOINT so CMD is interpreted as a plain command.
