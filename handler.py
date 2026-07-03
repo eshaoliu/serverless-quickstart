@@ -1,3 +1,4 @@
+import glob
 import os
 import subprocess
 import tempfile
@@ -37,33 +38,87 @@ def _model_exists() -> bool:
         return False
 
 
+def _find_gguf() -> str | None:
+    """Return the GGUF file to use.
+
+    Priority:
+    1. MODEL_PATH if it exists.
+    2. The only .gguf file under /mnt/models (recursively).
+    3. None.
+    """
+    if os.path.isfile(MODEL_PATH):
+        return MODEL_PATH
+
+    ggufs = glob.glob("/mnt/models/**/*.gguf", recursive=True)
+    ggufs = [f for f in ggufs if os.path.isfile(f)]
+    if len(ggufs) == 1:
+        print(
+            f"MODEL_PATH {MODEL_PATH} not found; using discovered GGUF: {ggufs[0]}",
+            flush=True,
+        )
+        return ggufs[0]
+    if len(ggufs) > 1:
+        print(
+            f"Warning: found multiple GGUFs under /mnt/models: {ggufs}. "
+            f"Set MODEL_PATH explicitly to choose one.",
+            flush=True,
+        )
+    return None
+
+
+def _pull_ollama_model() -> bool:
+    """Pull a model from the Ollama registry if OLLAMA_PULL_MODEL is set."""
+    pull_model = os.environ.get("OLLAMA_PULL_MODEL")
+    if not pull_model:
+        return False
+
+    print(f"Pulling Ollama model {pull_model}...", flush=True)
+    result = subprocess.run(
+        ["ollama", "pull", pull_model],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+        timeout=1800,
+    )
+    print(result.stdout, flush=True)
+    return True
+
+
 def _create_model():
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Model not found at {MODEL_PATH}. "
-            "Make sure the Network Volume is mounted to /mnt/models and MODEL_PATH is correct."
-        )
+    gguf_path = _find_gguf()
+    if gguf_path:
+        os.makedirs(OLLAMA_MODELS, exist_ok=True)
 
-    os.makedirs(OLLAMA_MODELS, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix="Modelfile", delete=False
+        ) as modelfile:
+            modelfile.write(f"FROM {gguf_path}\n")
+            modelfile_path = modelfile.name
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix="Modelfile", delete=False
-    ) as modelfile:
-        modelfile.write(f"FROM {MODEL_PATH}\n")
-        modelfile_path = modelfile.name
+        try:
+            result = subprocess.run(
+                ["ollama", "create", OLLAMA_MODEL_NAME, "-f", modelfile_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=True,
+                timeout=300,
+            )
+            print(result.stdout, flush=True)
+        finally:
+            os.unlink(modelfile_path)
+        return
 
-    try:
-        result = subprocess.run(
-            ["ollama", "create", OLLAMA_MODEL_NAME, "-f", modelfile_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-            timeout=300,
-        )
-        print(result.stdout, flush=True)
-    finally:
-        os.unlink(modelfile_path)
+    if _pull_ollama_model():
+        return
+
+    raise FileNotFoundError(
+        f"No GGUF model found at {MODEL_PATH} (or under /mnt/models) "
+        f"and OLLAMA_PULL_MODEL is not set. "
+        f"Either mount a Network Volume with the model file, "
+        f"or set OLLAMA_PULL_MODEL to an Ollama registry model name."
+    )
 
 
 def start_ollama():
@@ -86,7 +141,17 @@ def start_ollama():
         )
 
     if not _model_exists():
-        print(f"Importing {MODEL_PATH} into Ollama as {OLLAMA_MODEL_NAME}...", flush=True)
+        gguf_path = _find_gguf()
+        if gguf_path:
+            print(
+                f"Importing {gguf_path} into Ollama as {OLLAMA_MODEL_NAME}...",
+                flush=True,
+            )
+        elif os.environ.get("OLLAMA_PULL_MODEL"):
+            print(
+                f"No local GGUF; pulling {os.environ.get('OLLAMA_PULL_MODEL')} as {OLLAMA_MODEL_NAME}...",
+                flush=True,
+            )
         _create_model()
     else:
         print(f"Ollama model {OLLAMA_MODEL_NAME} already exists.", flush=True)

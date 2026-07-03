@@ -28,6 +28,9 @@ ENV OLLAMA_HOST=127.0.0.1:11434
 ENV OLLAMA_MODELS=/mnt/models/.ollama
 ENV MODEL_PATH=/mnt/models/model.gguf
 ENV OLLAMA_MODEL_NAME=runpod-model
+# Fallback: pull this Ollama registry model if no local GGUF is found.
+# Set to empty to disable pulling.
+ENV OLLAMA_PULL_MODEL=aware/qwen3.6-40b-deck-opus-neo-code
 
 # Clear any inherited ENTRYPOINT so CMD is interpreted as a plain command.
 ENTRYPOINT []
