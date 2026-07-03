@@ -78,10 +78,16 @@ def _pull_ollama_model() -> bool:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        check=True,
+        check=False,
         timeout=1800,
     )
     print(result.stdout, flush=True)
+    if result.returncode != 0:
+        print(
+            f"ollama pull failed with exit code {result.returncode}",
+            flush=True,
+        )
+        return False
     return True
 
 
