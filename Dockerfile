@@ -12,8 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt vllm-gguf-plugin
 
 WORKDIR /app
 
+# Force Docker to rebuild this layer whenever the GitHub repo has a new commit.
+# This prevents stale build cache from serving an old handler.py.
+ADD https://api.github.com/repos/eshaoliu/serverless-quickstart/commits?sha=main&per_page=1 /tmp/latest-commit.json
+
 # Copy the RunPod handler
 COPY handler.py .
+
+# Verify at build time that the handler is the expected vLLM version.
+RUN grep -E "from vllm import LLM" /app/handler.py && echo "handler.py is vLLM version" || (echo "handler.py is NOT vLLM version" && exit 1)
 
 # Use the RunPod cached model instead of baking the GGUF into the image.
 # The model is resolved at runtime from /runpod-volume/huggingface-cache/hub.
