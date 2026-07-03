@@ -25,7 +25,8 @@ COPY handler.py .
 # The model is resolved at runtime from /runpod-volume/huggingface-cache/hub.
 ENV PYTHONUNBUFFERED=1
 ENV OLLAMA_HOST=127.0.0.1:11434
-ENV OLLAMA_MODELS=/runpod-volume/huggingface-cache/.ollama
+# OLLAMA_MODELS is set dynamically by handler.py next to the resolved GGUF
+# so hard-links can share the same filesystem and avoid duplicating weights.
 ENV MODEL_NAME=DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF
 ENV MODEL_FILE=Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf
 ENV OLLAMA_MODEL_NAME=runpod-model

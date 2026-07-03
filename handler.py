@@ -23,7 +23,7 @@ HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
 OLLAMA_URL = f"http://{OLLAMA_HOST}"
-OLLAMA_MODELS = os.environ.get("OLLAMA_MODELS", "/runpod-volume/huggingface-cache/.ollama")
+OLLAMA_MODELS = os.environ.get("OLLAMA_MODELS", "")
 OLLAMA_MODEL_NAME = os.environ.get("OLLAMA_MODEL_NAME", "runpod-model")
 OLLAMA_PULL_MODEL = os.environ.get("OLLAMA_PULL_MODEL", "")
 
@@ -71,6 +71,21 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(16 * 1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _ensure_ollama_models_dir(gguf_path: str) -> str:
+    """Set OLLAMA_MODELS to a directory on the same filesystem as the GGUF.
+
+    Hard links only work within one filesystem. If the user has not explicitly
+    set OLLAMA_MODELS, place it in a '.ollama' sibling directory next to the
+    GGUF so the hard link to the weights can succeed.
+    """
+    global OLLAMA_MODELS
+    if os.environ.get("OLLAMA_MODELS"):
+        return OLLAMA_MODELS
+    OLLAMA_MODELS = os.path.join(os.path.dirname(gguf_path), ".ollama")
+    print(f"Auto-set OLLAMA_MODELS to GGUF sibling dir: {OLLAMA_MODELS}", flush=True)
+    return OLLAMA_MODELS
 
 
 def _stage_gguf_as_blob(gguf_path: str) -> str:
@@ -252,6 +267,8 @@ def _create_model() -> bool:
 
     gguf_path = _find_gguf()
     if gguf_path:
+        # Place .ollama on the same filesystem as the GGUF so hard links work.
+        _ensure_ollama_models_dir(gguf_path)
         os.makedirs(OLLAMA_MODELS, exist_ok=True)
 
         # Stage the GGUF as an Ollama blob first so `ollama create` does not
@@ -301,6 +318,12 @@ def _create_model() -> bool:
 def start_ollama():
     """Start the local Ollama server and ensure the model is imported."""
     global _ollama_process, _model_ready
+
+    # Resolve the GGUF first so we can place the Ollama models directory on the
+    # same filesystem, allowing hard-links and avoiding duplicate copies.
+    gguf_path = _find_gguf()
+    if gguf_path:
+        _ensure_ollama_models_dir(gguf_path)
 
     log_file = open("/tmp/ollama.log", "w", buffering=1)
     _ollama_process = subprocess.Popen(
