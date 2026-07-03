@@ -23,7 +23,7 @@ HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
 OLLAMA_URL = f"http://{OLLAMA_HOST}"
-OLLAMA_MODELS = os.environ.get("OLLAMA_MODELS", "/runpod-volume/.ollama")
+OLLAMA_MODELS = os.environ.get("OLLAMA_MODELS", "/runpod-volume/huggingface-cache/.ollama")
 OLLAMA_MODEL_NAME = os.environ.get("OLLAMA_MODEL_NAME", "runpod-model")
 OLLAMA_PULL_MODEL = os.environ.get("OLLAMA_PULL_MODEL", "")
 
