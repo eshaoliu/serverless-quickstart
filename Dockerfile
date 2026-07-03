@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /runpod-volume
 
 # Install Python dependencies. Debian 12 marks the system environment as
 # externally-managed, so we need --break-system-packages in this single-purpose
