@@ -15,7 +15,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 # The sglang image marks the system env as externally-managed, so we must use
 # --break-system-packages to install the RunPod SDK into it.
 COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN python3 -m pip install --no-cache-dir --break-system-packages -v -r requirements.txt
 
 # Copy the RunPod handler
 COPY handler.py .
