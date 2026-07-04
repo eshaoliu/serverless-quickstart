@@ -32,8 +32,7 @@ ENV MODEL_FILE=""
 ENV SGLANG_PORT=30000
 ENV TENSOR_PARALLEL_SIZE=1
 ENV TRUST_REMOTE_CODE=true
-# HuggingFace token for gated/private models.
-ENV HF_TOKEN=""
+# NOTE: set HF_TOKEN via RunPod endpoint env vars, not here.
 
 # Clear any inherited ENTRYPOINT so CMD is interpreted as a plain command.
 ENTRYPOINT []
