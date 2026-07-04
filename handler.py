@@ -1,138 +1,41 @@
 import glob
-import hashlib
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 
 import requests
 import runpod
 
 # Model resolution priority:
-# 1. MODEL_PATH, if set and the file exists.
+# 1. MODEL_PATH, if set and points to a model file or directory.
 # 2. A RunPod cached Hugging Face model (MODEL_NAME).
-# 3. A single .gguf discovered under /mnt/models.
+# 3. A single model discovered under /mnt/models.
 MODEL_PATH = os.environ.get("MODEL_PATH", "")
 MODEL_NAME = os.environ.get(
     "MODEL_NAME",
-    "DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF",
+    "DreamFast/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Safetensor-Benchmark",
 )
 MODEL_FILE = os.environ.get("MODEL_FILE", "")
 HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
 
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
-OLLAMA_URL = f"http://{OLLAMA_HOST}"
-OLLAMA_MODELS = os.environ.get("OLLAMA_MODELS", "")
-OLLAMA_MODEL_NAME = os.environ.get("OLLAMA_MODEL_NAME", "runpod-model")
-OLLAMA_PULL_MODEL = os.environ.get("OLLAMA_PULL_MODEL", "")
+SGLANG_PORT = int(os.environ.get("SGLANG_PORT", "30000"))
+SGLANG_URL = f"http://127.0.0.1:{SGLANG_PORT}"
+TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
+TRUST_REMOTE_CODE = os.environ.get("TRUST_REMOTE_CODE", "true").lower() in ("1", "true", "yes")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-# Minimum free space (in GB) required before attempting an Ollama registry pull.
-MIN_PULL_FREE_GB = int(os.environ.get("MIN_PULL_FREE_GB", "30"))
-
-_ollama_process = None
+_sglang_process = None
 _model_ready = False
 
-# Identifies this handler version in worker logs.
-print("handler.py: Ollama hard-link branch", flush=True)
+print("handler.py: SGLang branch", flush=True)
 print(
     f"MODEL_PATH={MODEL_PATH!r} MODEL_NAME={MODEL_NAME!r} "
-    f"MODEL_FILE={MODEL_FILE!r} OLLAMA_MODELS={OLLAMA_MODELS!r}",
+    f"MODEL_FILE={MODEL_FILE!r} SGLANG_PORT={SGLANG_PORT}",
     flush=True,
 )
 
 
-def _wait_for_ollama(timeout: int = 120):
-    for _ in range(timeout):
-        try:
-            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
-            if response.status_code == 200:
-                return True
-        except Exception:
-            pass
-        time.sleep(1)
-    return False
-
-
-def _model_exists() -> bool:
-    try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
-        response.raise_for_status()
-        models = response.json().get("models", [])
-        return any(m.get("name") == OLLAMA_MODEL_NAME for m in models)
-    except Exception:
-        return False
-
-
-def _free_space_gb(path: str) -> float:
-    try:
-        stat = shutil.disk_usage(path)
-        return stat.free / (1024**3)
-    except Exception:
-        return 0.0
-
-
-def _sha256_file(path: str) -> str:
-    """Return the hex sha256 digest of a file."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(16 * 1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _ensure_ollama_models_dir(gguf_path: str) -> str:
-    """Set OLLAMA_MODELS to a directory on the same filesystem as the GGUF.
-
-    Hard links only work within one filesystem. If the user has not explicitly
-    set OLLAMA_MODELS, place it in a '.ollama' sibling directory next to the
-    GGUF so the hard link to the weights can succeed.
-    """
-    global OLLAMA_MODELS
-    if os.environ.get("OLLAMA_MODELS"):
-        return OLLAMA_MODELS
-    OLLAMA_MODELS = os.path.join(os.path.dirname(gguf_path), ".ollama")
-    print(f"Auto-set OLLAMA_MODELS to GGUF sibling dir: {OLLAMA_MODELS}", flush=True)
-    return OLLAMA_MODELS
-
-
-def _stage_gguf_as_blob(gguf_path: str) -> str:
-    """Make the GGUF reachable as an Ollama blob without copying it.
-
-    Ollama stores model weights under $OLLAMA_MODELS/blobs/sha256-<digest>.
-    By pre-computing the digest and hard-linking the original GGUF into that
-    location, `ollama create` sees the blob already exists and skips the copy,
-    so the Hugging Face cache GGUF is not duplicated on disk.
-    """
-    digest = _sha256_file(gguf_path)
-    blob_dir = os.path.join(OLLAMA_MODELS, "blobs")
-    os.makedirs(blob_dir, exist_ok=True)
-    blob_path = os.path.join(blob_dir, f"sha256-{digest}")
-
-    if os.path.exists(blob_path):
-        print(f"Ollama blob already exists: {blob_path}", flush=True)
-        return digest
-
-    try:
-        # Hard link shares the inode; no extra disk space is used.
-        os.link(gguf_path, blob_path)
-        print(
-            f"Hard-linked GGUF to Ollama blob (no extra space): "
-            f"{gguf_path} -> {blob_path}",
-            flush=True,
-        )
-    except OSError as exc:
-        # Fall back to a symlink if hard links are not possible (e.g. cross-fs).
-        os.symlink(os.path.abspath(gguf_path), blob_path)
-        print(
-            f"Could not hard-link ({exc}); symlinked GGUF to Ollama blob: "
-            f"{blob_path} -> {gguf_path}",
-            flush=True,
-        )
-    return digest
-
-
-def resolve_snapshot_path(model_id: str) -> str:
+def _resolve_snapshot_path(model_id: str) -> str:
     """Resolve the local snapshot path for a RunPod cached Hugging Face model."""
     if "/" not in model_id:
         raise ValueError(f"MODEL_ID '{model_id}' must be in 'org/name' format")
@@ -162,8 +65,19 @@ def resolve_snapshot_path(model_id: str) -> str:
     raise RuntimeError(f"Cached model not found: {model_id}")
 
 
-def _pick_gguf_from_dir(directory: str) -> str | None:
-    """Return a single .gguf from *directory* or its subdirs, preferring MODEL_FILE."""
+def _pick_model_from_dir(directory: str) -> str | None:
+    """Return a usable model path from *directory* or its subdirs.
+
+    For SGLang we normally need a directory containing config.json + safetensors.
+    Falls back to a single GGUF file if no Transformers-format model is found.
+    """
+    config_paths = glob.glob(os.path.join(directory, "**/config.json"), recursive=True)
+    config_paths = [p for p in config_paths if os.path.isfile(p)]
+    if config_paths:
+        # Prefer the config.json closest to the root; usually that's the model dir.
+        config_paths.sort(key=lambda p: len(p.split(os.sep)))
+        return os.path.dirname(config_paths[0])
+
     ggufs = glob.glob(os.path.join(directory, "**", "*.gguf"), recursive=True)
     ggufs = [f for f in ggufs if os.path.isfile(f)]
     if not ggufs:
@@ -190,47 +104,43 @@ def _pick_gguf_from_dir(directory: str) -> str | None:
     return ggufs[0]
 
 
-def _find_cached_gguf() -> str | None:
-    """Return the GGUF path from a RunPod cached Hugging Face model, if available."""
-    try:
-        snapshot_dir = resolve_snapshot_path(MODEL_NAME)
-    except Exception as exc:
-        print(f"Could not resolve cached model {MODEL_NAME}: {exc}", flush=True)
-        return None
-
-    print(f"Resolved cached model snapshot: {snapshot_dir}", flush=True)
-    return _pick_gguf_from_dir(snapshot_dir)
-
-
-def _find_gguf() -> str | None:
-    """Return the GGUF file to use.
+def _find_model() -> str | None:
+    """Return the model path to use.
 
     Priority:
     1. MODEL_PATH if it exists.
     2. The RunPod cached model for MODEL_NAME.
-    3. The only .gguf file under /mnt/models (recursively).
+    3. The only model under /mnt/models (recursively).
     4. None.
     """
     if MODEL_PATH:
         if os.path.isfile(MODEL_PATH):
             return MODEL_PATH
         if os.path.isdir(MODEL_PATH):
-            print(f"MODEL_PATH is a directory; looking for GGUF inside: {MODEL_PATH}", flush=True)
-            cached_path = _pick_gguf_from_dir(MODEL_PATH)
-            if cached_path:
-                return cached_path
+            print(f"MODEL_PATH is a directory; looking for model inside: {MODEL_PATH}", flush=True)
+            model_path = _pick_model_from_dir(MODEL_PATH)
+            if model_path:
+                return model_path
 
-    cached_path = _find_cached_gguf()
-    if cached_path:
-        return cached_path
+    try:
+        snapshot_dir = _resolve_snapshot_path(MODEL_NAME)
+        print(f"Resolved cached model snapshot: {snapshot_dir}", flush=True)
+        model_path = _pick_model_from_dir(snapshot_dir)
+        if model_path:
+            return model_path
+    except Exception as exc:
+        print(f"Could not resolve cached model {MODEL_NAME}: {exc}", flush=True)
+
+    config_paths = glob.glob("/mnt/models/**/config.json", recursive=True)
+    config_paths = [p for p in config_paths if os.path.isfile(p)]
+    if len(config_paths) == 1:
+        print(f"Using discovered model dir: {os.path.dirname(config_paths[0])}", flush=True)
+        return os.path.dirname(config_paths[0])
 
     ggufs = glob.glob("/mnt/models/**/*.gguf", recursive=True)
     ggufs = [f for f in ggufs if os.path.isfile(f)]
     if len(ggufs) == 1:
-        print(
-            f"MODEL_PATH {MODEL_PATH} not found; using discovered GGUF: {ggufs[0]}",
-            flush=True,
-        )
+        print(f"Using discovered GGUF: {ggufs[0]}", flush=True)
         return ggufs[0]
     if len(ggufs) > 1:
         print(
@@ -241,147 +151,89 @@ def _find_gguf() -> str | None:
     return None
 
 
-def _pull_ollama_model() -> bool:
-    """Pull a model from the Ollama registry if OLLAMA_PULL_MODEL is set."""
-    if not OLLAMA_PULL_MODEL:
-        return False
-
-    free_gb = _free_space_gb(OLLAMA_MODELS)
-    if free_gb < MIN_PULL_FREE_GB:
-        print(
-            f"Skipping ollama pull: only {free_gb:.1f} GB free at "
-            f"{OLLAMA_MODELS}, need at least {MIN_PULL_FREE_GB} GB. "
-            f"Mount a larger Network Volume at /mnt/models.",
-            flush=True,
-        )
-        return False
-
-    print(f"Pulling Ollama model {OLLAMA_PULL_MODEL}...", flush=True)
-    result = subprocess.run(
-        ["ollama", "pull", OLLAMA_PULL_MODEL],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-        timeout=1800,
-    )
-    print(result.stdout, flush=True)
-    if result.returncode != 0:
-        print(
-            f"ollama pull failed with exit code {result.returncode}",
-            flush=True,
-        )
-        return False
-    return True
-
-
-def _create_model() -> bool:
-    """Import or pull the model. Returns True on success, False otherwise."""
-    global _model_ready
-
-    gguf_path = _find_gguf()
-    if gguf_path:
-        # Place .ollama on the same filesystem as the GGUF so hard links work.
-        _ensure_ollama_models_dir(gguf_path)
-        os.makedirs(OLLAMA_MODELS, exist_ok=True)
-
-        # Stage the GGUF as an Ollama blob first so `ollama create` does not
-        # duplicate the multi-GB weights file in $OLLAMA_MODELS/blobs.
-        _stage_gguf_as_blob(gguf_path)
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix="Modelfile", delete=False
-        ) as modelfile:
-            modelfile.write(f"FROM {gguf_path}\n")
-            modelfile_path = modelfile.name
-
+def _wait_for_sglang(timeout: int = 300) -> bool:
+    for _ in range(timeout):
         try:
-            result = subprocess.run(
-                ["ollama", "create", OLLAMA_MODEL_NAME, "-f", modelfile_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=True,
-                timeout=1800,
-            )
-            print(result.stdout, flush=True)
-            _model_ready = True
-            return True
-        except subprocess.CalledProcessError as exc:
-            print(f"ollama create failed: {exc.output}", flush=True)
-            return False
-        finally:
-            os.unlink(modelfile_path)
-
-    if _pull_ollama_model():
-        _model_ready = True
-        return True
-
-    print(
-        "No model is available. Options:\n"
-        "  1. Set MODEL_PATH to a local GGUF file.\n"
-        "  2. Configure a RunPod cached model (MODEL_NAME) in the endpoint "
-        "     Model section and ensure /runpod-volume is mounted.\n"
-        "  3. Mount a Network Volume at /mnt/models with a .gguf file.\n"
-        "  4. Set OLLAMA_PULL_MODEL to an Ollama registry model with enough disk space.",
-        flush=True,
-    )
+            response = requests.get(f"{SGLANG_URL}/health", timeout=2)
+            if response.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
     return False
 
 
-def start_ollama():
-    """Start the local Ollama server and ensure the model is imported."""
-    global _ollama_process, _model_ready
+def _start_sglang():
+    """Start the local SGLang server."""
+    global _sglang_process, _model_ready
 
-    # Resolve the GGUF first so we can place the Ollama models directory on the
-    # same filesystem, allowing hard-links and avoiding duplicate copies.
-    gguf_path = _find_gguf()
-    if gguf_path:
-        _ensure_ollama_models_dir(gguf_path)
+    model_path = _find_model()
+    if not model_path:
+        raise RuntimeError(
+            "No model is available. Options:\n"
+            "  1. Set MODEL_PATH to a local model dir or file.\n"
+            "  2. Configure a RunPod cached model (MODEL_NAME).\n"
+            "  3. Mount a Network Volume at /mnt/models with a model."
+        )
 
-    log_file = open("/tmp/ollama.log", "w", buffering=1)
-    _ollama_process = subprocess.Popen(
-        ["ollama", "serve"],
+    print(f"Starting SGLang server for model: {model_path}", flush=True)
+    print(
+        f"SGLang options: port={SGLANG_PORT}, tp={TENSOR_PARALLEL_SIZE}, "
+        f"trust_remote_code={TRUST_REMOTE_CODE}",
+        flush=True,
+    )
+
+    cmd = [
+        "python3",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model_path,
+        "--tp",
+        str(TENSOR_PARALLEL_SIZE),
+        "--port",
+        str(SGLANG_PORT),
+        "--host",
+        "127.0.0.1",
+    ]
+    if TRUST_REMOTE_CODE:
+        cmd.append("--trust-remote-code")
+
+    log_file = open("/tmp/sglang.log", "w", buffering=1)
+    env = {**os.environ}
+    if HF_TOKEN:
+        env["HF_TOKEN"] = HF_TOKEN
+        env["HUGGINGFACE_HUB_TOKEN"] = HF_TOKEN
+
+    _sglang_process = subprocess.Popen(
+        cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
-        env={**os.environ, "OLLAMA_MODELS": OLLAMA_MODELS},
+        env=env,
     )
 
-    if not _wait_for_ollama(120):
+    if not _wait_for_sglang(300):
         raise RuntimeError(
-            "Ollama server did not start within 120 seconds. "
-            "Check /tmp/ollama.log for details."
+            "SGLang server did not start within 300 seconds. "
+            "Check /tmp/sglang.log for details."
         )
 
-    if _model_exists():
-        print(f"Ollama model {OLLAMA_MODEL_NAME} already exists.", flush=True)
-        _model_ready = True
-    else:
-        gguf_path = _find_gguf()
-        if gguf_path:
-            print(
-                f"Importing {gguf_path} into Ollama as {OLLAMA_MODEL_NAME}...",
-                flush=True,
-            )
-        elif OLLAMA_PULL_MODEL:
-            print(
-                f"No local GGUF; attempting to pull {OLLAMA_PULL_MODEL}...",
-                flush=True,
-            )
-        _create_model()
+    _model_ready = True
+    print("SGLang server is ready.", flush=True)
 
 
 def handler(event):
-    """RunPod Serverless handler that proxies requests to Ollama."""
-    if _ollama_process is None:
-        start_ollama()
+    """RunPod Serverless handler that proxies requests to SGLang."""
+    global _sglang_process, _model_ready
+    if _sglang_process is None:
+        _start_sglang()
 
     if not _model_ready:
         return {
             "error": (
                 "Model is not loaded. Set MODEL_PATH, configure a RunPod cached model, "
-                "mount a Network Volume at /mnt/models, or set OLLAMA_PULL_MODEL."
+                "or mount a Network Volume at /mnt/models."
             )
         }
 
@@ -392,40 +244,37 @@ def handler(event):
         messages = [{"role": "user", "content": input_data["prompt"]}]
 
     payload = {
-        "model": OLLAMA_MODEL_NAME,
+        "model": MODEL_NAME,
         "messages": messages,
         "stream": False,
-        "options": {
-            "temperature": input_data.get("temperature", 0.7),
-            "top_p": input_data.get("top_p", 1.0),
-            "num_predict": input_data.get("max_tokens", 512),
-        },
+        "temperature": input_data.get("temperature", 0.7),
+        "top_p": input_data.get("top_p", 1.0),
+        "max_tokens": input_data.get("max_tokens", 512),
     }
 
     response = requests.post(
-        f"{OLLAMA_URL}/api/chat",
+        f"{SGLANG_URL}/v1/chat/completions",
         json=payload,
         timeout=300,
     )
     response.raise_for_status()
     data = response.json()
 
-    # Normalize to an OpenAI-like response shape.
+    message = data.get("choices", [{}])[0].get("message", {})
     return {
         "choices": [
             {
                 "index": 0,
                 "message": {
-                    "role": data.get("message", {}).get("role", "assistant"),
-                    "content": data.get("message", {}).get("content", ""),
+                    "role": message.get("role", "assistant"),
+                    "content": message.get("content", ""),
                 },
                 "finish_reason": "stop",
             }
         ],
-        "model": OLLAMA_MODEL_NAME,
+        "model": MODEL_NAME,
     }
 
 
 if __name__ == "__main__":
-    start_ollama()
     runpod.serverless.start({"handler": handler})
