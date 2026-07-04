@@ -1,5 +1,5 @@
-# Use SGLang as the inference engine.
-FROM lmsysorg/sglang:latest
+# Use vLLM as the inference engine.
+FROM vllm/vllm-openai:latest
 
 USER root
 
@@ -8,31 +8,27 @@ ADD https://api.github.com/repos/eshaoliu/serverless-quickstart/commits?sha=main
 
 WORKDIR /app
 
-# Ensure pip is usable and upgrade core tools.
-RUN python3 -m pip install --upgrade pip setuptools wheel
-
 # Install Python dependencies.
-# The sglang image marks the system env as externally-managed, so we must use
-# --break-system-packages to install the RunPod SDK into it.
+# --ignore-installed avoids conflicts with Debian-managed packages (e.g. cryptography).
 COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir --break-system-packages -v -r requirements.txt
+RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt
 
 # Copy the RunPod handler
 COPY handler.py .
 
-# Build-time verification (non-fatal): confirm handler contains SGLang markers.
-RUN grep -E "sglang.launch_server|SGLANG_PORT" /app/handler.py && \
-    echo "handler.py is SGLang version" || \
-    echo "WARNING: handler.py SGLang marker not found"
+# Build-time verification (non-fatal): confirm handler contains vLLM markers.
+RUN grep -E "vllm|VLLM_PORT" /app/handler.py && \
+    echo "handler.py is vLLM version" || \
+    echo "WARNING: handler.py vLLM marker not found"
 
 # Use the RunPod cached model instead of baking weights into the image.
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_NAME=DreamFast/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Safetensor-Benchmark
 ENV MODEL_FILE=""
-ENV SGLANG_PORT=30000
+ENV VLLM_PORT=8000
 ENV TENSOR_PARALLEL_SIZE=1
 ENV TRUST_REMOTE_CODE=true
-# NOTE: set HF_TOKEN via RunPod endpoint env vars, not here.
+# NOTE: set HF_TOKEN via RunPod endpoint env vars if the model is gated.
 
 # Clear any inherited ENTRYPOINT so CMD is interpreted as a plain command.
 ENTRYPOINT []

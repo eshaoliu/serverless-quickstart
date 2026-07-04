@@ -18,19 +18,19 @@ MODEL_NAME = os.environ.get(
 MODEL_FILE = os.environ.get("MODEL_FILE", "")
 HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
 
-SGLANG_PORT = int(os.environ.get("SGLANG_PORT", "30000"))
-SGLANG_URL = f"http://127.0.0.1:{SGLANG_PORT}"
+VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
+VLLM_URL = f"http://127.0.0.1:{VLLM_PORT}"
 TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
 TRUST_REMOTE_CODE = os.environ.get("TRUST_REMOTE_CODE", "true").lower() in ("1", "true", "yes")
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
+GPU_MEMORY_UTILIZATION = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0.9"))
 
-_sglang_process = None
+_vllm_process = None
 _model_ready = False
 
-print("handler.py: SGLang branch", flush=True)
+print("handler.py: vLLM branch", flush=True)
 print(
     f"MODEL_PATH={MODEL_PATH!r} MODEL_NAME={MODEL_NAME!r} "
-    f"MODEL_FILE={MODEL_FILE!r} SGLANG_PORT={SGLANG_PORT}",
+    f"MODEL_FILE={MODEL_FILE!r} VLLM_PORT={VLLM_PORT}",
     flush=True,
 )
 
@@ -68,13 +68,12 @@ def _resolve_snapshot_path(model_id: str) -> str:
 def _pick_model_from_dir(directory: str) -> str | None:
     """Return a usable model path from *directory* or its subdirs.
 
-    For SGLang we normally need a directory containing config.json + safetensors.
+    For vLLM we normally need a directory containing config.json + safetensors.
     Falls back to a single GGUF file if no Transformers-format model is found.
     """
     config_paths = glob.glob(os.path.join(directory, "**/config.json"), recursive=True)
     config_paths = [p for p in config_paths if os.path.isfile(p)]
     if config_paths:
-        # Prefer the config.json closest to the root; usually that's the model dir.
         config_paths.sort(key=lambda p: len(p.split(os.sep)))
         return os.path.dirname(config_paths[0])
 
@@ -151,10 +150,10 @@ def _find_model() -> str | None:
     return None
 
 
-def _wait_for_sglang(timeout: int = 300) -> bool:
+def _wait_for_vllm(timeout: int = 300) -> bool:
     for _ in range(timeout):
         try:
-            response = requests.get(f"{SGLANG_URL}/health", timeout=2)
+            response = requests.get(f"{VLLM_URL}/health", timeout=2)
             if response.status_code == 200:
                 return True
         except Exception:
@@ -163,9 +162,9 @@ def _wait_for_sglang(timeout: int = 300) -> bool:
     return False
 
 
-def _start_sglang():
-    """Start the local SGLang server."""
-    global _sglang_process, _model_ready
+def _start_vllm():
+    """Start the local vLLM OpenAI-compatible server."""
+    global _vllm_process, _model_ready
 
     model_path = _find_model()
     if not model_path:
@@ -176,58 +175,55 @@ def _start_sglang():
             "  3. Mount a Network Volume at /mnt/models with a model."
         )
 
-    print(f"Starting SGLang server for model: {model_path}", flush=True)
+    print(f"Starting vLLM server for model: {model_path}", flush=True)
     print(
-        f"SGLang options: port={SGLANG_PORT}, tp={TENSOR_PARALLEL_SIZE}, "
-        f"trust_remote_code={TRUST_REMOTE_CODE}",
+        f"vLLM options: port={VLLM_PORT}, tp={TENSOR_PARALLEL_SIZE}, "
+        f"trust_remote_code={TRUST_REMOTE_CODE}, "
+        f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION}",
         flush=True,
     )
 
     cmd = [
         "python3",
         "-m",
-        "sglang.launch_server",
-        "--model-path",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
         model_path,
-        "--tp",
+        "--tensor-parallel-size",
         str(TENSOR_PARALLEL_SIZE),
         "--port",
-        str(SGLANG_PORT),
+        str(VLLM_PORT),
         "--host",
         "127.0.0.1",
+        "--gpu-memory-utilization",
+        str(GPU_MEMORY_UTILIZATION),
     ]
     if TRUST_REMOTE_CODE:
         cmd.append("--trust-remote-code")
 
-    log_file = open("/tmp/sglang.log", "w", buffering=1)
-    env = {**os.environ}
-    if HF_TOKEN:
-        env["HF_TOKEN"] = HF_TOKEN
-        env["HUGGINGFACE_HUB_TOKEN"] = HF_TOKEN
-
-    _sglang_process = subprocess.Popen(
+    log_file = open("/tmp/vllm.log", "w", buffering=1)
+    _vllm_process = subprocess.Popen(
         cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
-        env=env,
     )
 
-    if not _wait_for_sglang(300):
+    if not _wait_for_vllm(300):
         raise RuntimeError(
-            "SGLang server did not start within 300 seconds. "
-            "Check /tmp/sglang.log for details."
+            "vLLM server did not start within 300 seconds. "
+            "Check /tmp/vllm.log for details."
         )
 
     _model_ready = True
-    print("SGLang server is ready.", flush=True)
+    print("vLLM server is ready.", flush=True)
 
 
 def handler(event):
-    """RunPod Serverless handler that proxies requests to SGLang."""
-    global _sglang_process, _model_ready
-    if _sglang_process is None:
-        _start_sglang()
+    """RunPod Serverless handler that proxies requests to vLLM."""
+    global _vllm_process, _model_ready
+    if _vllm_process is None:
+        _start_vllm()
 
     if not _model_ready:
         return {
@@ -253,7 +249,7 @@ def handler(event):
     }
 
     response = requests.post(
-        f"{SGLANG_URL}/v1/chat/completions",
+        f"{VLLM_URL}/v1/chat/completions",
         json=payload,
         timeout=300,
     )
