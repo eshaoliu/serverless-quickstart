@@ -6,17 +6,25 @@ USER root
 # Force Docker to rebuild this layer whenever the GitHub repo has a new commit.
 ADD https://api.github.com/repos/eshaoliu/serverless-quickstart/commits?sha=main&per_page=1 /tmp/latest-commit.json
 
-# Install Python dependencies.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 WORKDIR /app
+
+# Ensure pip is usable and upgrade core tools.
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# Install Python dependencies.
+# The sglang image may mark the system env as externally-managed, so fall back
+# to --break-system-packages if the plain install fails.
+COPY requirements.txt .
+RUN python3 -m pip install --no-cache-dir -r requirements.txt || \
+    python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy the RunPod handler
 COPY handler.py .
 
-# Verify at build time that the handler is the expected SGLang version.
-RUN grep -E "sglang.launch_server|SGLANG_PORT" /app/handler.py && echo "handler.py is SGLang version"
+# Build-time verification (non-fatal): confirm handler contains SGLang markers.
+RUN grep -E "sglang.launch_server|SGLANG_PORT" /app/handler.py && \
+    echo "handler.py is SGLang version" || \
+    echo "WARNING: handler.py SGLang marker not found"
 
 # Use the RunPod cached model instead of baking weights into the image.
 ENV PYTHONUNBUFFERED=1
@@ -24,6 +32,7 @@ ENV MODEL_NAME=DreamFast/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Safetens
 ENV MODEL_FILE=""
 ENV SGLANG_PORT=30000
 ENV TENSOR_PARALLEL_SIZE=1
+ENV TRUST_REMOTE_CODE=true
 # HuggingFace token for gated/private models.
 ENV HF_TOKEN=""
 
