@@ -22,7 +22,8 @@ VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 VLLM_URL = f"http://127.0.0.1:{VLLM_PORT}"
 TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
 TRUST_REMOTE_CODE = os.environ.get("TRUST_REMOTE_CODE", "true").lower() in ("1", "true", "yes")
-GPU_MEMORY_UTILIZATION = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0.9"))
+GPU_MEMORY_UTILIZATION = float(os.environ.get("GPU_MEMORY_UTILIZATION", "0.95"))
+MAX_MODEL_LEN = int(os.environ.get("MAX_MODEL_LEN", "32768"))
 
 _vllm_process = None
 _model_ready = False
@@ -30,7 +31,8 @@ _model_ready = False
 print("handler.py: vLLM branch", flush=True)
 print(
     f"MODEL_PATH={MODEL_PATH!r} MODEL_NAME={MODEL_NAME!r} "
-    f"MODEL_FILE={MODEL_FILE!r} VLLM_PORT={VLLM_PORT}",
+    f"MODEL_FILE={MODEL_FILE!r} VLLM_PORT={VLLM_PORT} "
+    f"GPU_MEMORY_UTILIZATION={GPU_MEMORY_UTILIZATION} MAX_MODEL_LEN={MAX_MODEL_LEN}",
     flush=True,
 )
 
@@ -179,7 +181,8 @@ def _start_vllm():
     print(
         f"vLLM options: port={VLLM_PORT}, tp={TENSOR_PARALLEL_SIZE}, "
         f"trust_remote_code={TRUST_REMOTE_CODE}, "
-        f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION}",
+        f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION}, "
+        f"max_model_len={MAX_MODEL_LEN}",
         flush=True,
     )
 
@@ -197,6 +200,8 @@ def _start_vllm():
         "127.0.0.1",
         "--gpu-memory-utilization",
         str(GPU_MEMORY_UTILIZATION),
+        "--max-model-len",
+        str(MAX_MODEL_LEN),
     ]
     if TRUST_REMOTE_CODE:
         cmd.append("--trust-remote-code")

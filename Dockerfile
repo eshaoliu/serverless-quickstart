@@ -28,6 +28,8 @@ ENV MODEL_FILE=""
 ENV VLLM_PORT=8000
 ENV TENSOR_PARALLEL_SIZE=1
 ENV TRUST_REMOTE_CODE=true
+ENV GPU_MEMORY_UTILIZATION=0.95
+ENV MAX_MODEL_LEN=32768
 # NOTE: set HF_TOKEN via RunPod endpoint env vars if the model is gated.
 
 # Clear any inherited ENTRYPOINT so CMD is interpreted as a plain command.
