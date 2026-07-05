@@ -194,6 +194,8 @@ def _start_vllm():
         "vllm.entrypoints.openai.api_server",
         "--model",
         model_path,
+        "--served-model-name",
+        MODEL_NAME,
         "--tensor-parallel-size",
         str(TENSOR_PARALLEL_SIZE),
         "--port",
